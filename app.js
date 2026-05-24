@@ -1,5 +1,11 @@
 const STORAGE_KEY = "ashita-no-chizu:v1";
 
+const supabaseConfig = window.ASHITA_SUPABASE_CONFIG || {};
+const supabaseClient =
+  window.supabase && supabaseConfig.url && supabaseConfig.publishableKey
+    ? window.supabase.createClient(supabaseConfig.url, supabaseConfig.publishableKey)
+    : null;
+
 const ageGroups = ["13-15", "16-18", "19-22", "23-29", "30以上"];
 
 const questions = [
@@ -243,6 +249,11 @@ function createInitialState() {
     diagnosisAnswer: null,
     result: null,
     selectedGoal: "",
+    authUser: null,
+    authEmail: "",
+    authMessage: "",
+    syncStatus: "",
+    diagnosisHistory: [],
     error: "",
   };
 }
@@ -269,6 +280,57 @@ function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
 }
 
+async function initializeApp() {
+  if (!supabaseClient) {
+    state.syncStatus = "クラウド保存は未設定です。";
+    render();
+    return;
+  }
+
+  try {
+    const { data } = await supabaseClient.auth.getSession();
+    await applySession(data?.session || null, { loadCloud: true });
+    supabaseClient.auth.onAuthStateChange((_event, session) => {
+      applySession(session, { loadCloud: true });
+    });
+  } catch (error) {
+    console.warn("Failed to initialize auth", error);
+    state.syncStatus = "ログイン状態を確認できませんでした。";
+    render();
+  }
+}
+
+async function applySession(session, options = {}) {
+  state.authUser = session?.user || null;
+  state.authEmail = session?.user?.email || "";
+
+  if (!state.authUser) {
+    state.diagnosisHistory = [];
+    render();
+    return;
+  }
+
+  state.syncStatus = `${state.authEmail} でログイン中です。`;
+  if (options.loadCloud) {
+    await loadCloudData();
+  }
+  render();
+}
+
+function isLoggedIn() {
+  return Boolean(state.authUser?.id);
+}
+
+function getRedirectUrl() {
+  return window.location.origin + window.location.pathname;
+}
+
+function getStorageLabel() {
+  return isLoggedIn()
+    ? "診断結果はクラウドに保存され、同じアカウントで別端末からも見られます。"
+    : "診断結果は、この端末のブラウザ内に保存されます。別端末との共有にはログインが必要です。";
+}
+
 function uid(prefix) {
   const id = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}_${id}`;
@@ -281,6 +343,7 @@ function now() {
 function setScreen(screen) {
   state.screen = screen;
   state.error = "";
+  state.authMessage = "";
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -351,6 +414,7 @@ function renderTopbar() {
         ${hasResult ? `<button class="btn ghost" onclick="setScreen('map')">未来マップ</button>` : ""}
         ${hasResult ? `<button class="btn ghost" onclick="setScreen('poster')">応援図</button>` : ""}
         ${hasResult ? `<button class="btn ghost" onclick="setScreen('mypage')">マイページ</button>` : ""}
+        <button class="btn ghost" onclick="setScreen('login')">${isLoggedIn() ? "アカウント" : "ログイン"}</button>
       </nav>
     </header>
   `;
@@ -370,6 +434,8 @@ function renderScreen() {
     home: renderHome,
     mypage: renderMypage,
     settings: renderSettings,
+    login: renderLogin,
+    history: renderHistory,
   };
   return (screens[state.screen] || renderWelcome)();
 }
@@ -388,6 +454,7 @@ function renderWelcome() {
         <div class="actions">
           <button class="btn primary" onclick="setScreen('profile')">はじめる</button>
           ${state.result ? `<button class="btn ghost" onclick="setScreen('home')">保存した地図を見る</button>` : ""}
+          <button class="btn ghost" onclick="setScreen('login')">ログインして同期</button>
         </div>
       </section>
       <aside class="map-preview" aria-label="未来マップのプレビュー">
@@ -434,7 +501,7 @@ function renderProfile() {
             </select>
           </div>
           <p class="privacy-note">
-            会話全文は保存せず、診断回答と分析結果だけをこの端末のLocalStorageに保存します。保存データはいつでも削除できます。
+            会話全文は保存しません。${getStorageLabel()}
           </p>
           ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
           <div class="actions between">
@@ -447,7 +514,7 @@ function renderProfile() {
   `;
 }
 
-function submitProfile() {
+async function submitProfile() {
   const nickname = document.querySelector("#nickname").value.trim();
   const age = document.querySelector("#age").value;
   if (!nickname) {
@@ -455,7 +522,7 @@ function submitProfile() {
     render();
     return;
   }
-  const existingId = state.user?.id || uid("user");
+  const existingId = state.authUser?.id || state.user?.id || uid("user");
   state.user = {
     id: existingId,
     nickname,
@@ -473,6 +540,9 @@ function submitProfile() {
   }
   state.questionIndex = 0;
   saveState();
+  if (isLoggedIn()) {
+    await saveProfileToCloud();
+  }
   setScreen("diagnosis");
 }
 
@@ -622,17 +692,21 @@ function renderAnalyzing() {
 
 function analyze() {
   setScreen("analyzing");
-  window.setTimeout(() => {
+  window.setTimeout(async () => {
     const result = generateLocalAnalysis(state.diagnosisAnswer.answers);
     state.result = {
       id: uid("result"),
-      user_id: state.user.id,
+      user_id: state.authUser?.id || state.user.id,
       diagnosis_answer_id: state.diagnosisAnswer.id,
       ...result,
       created_at: now(),
     };
     state.selectedGoal = result.one_year_goal;
     saveState();
+    if (isLoggedIn()) {
+      await saveProfileToCloud();
+      await saveDiagnosisToCloud();
+    }
     setScreen("result");
   }, 900);
 }
@@ -1002,12 +1076,13 @@ function renderHome() {
         </article>
         <article class="home-panel">
           <h3>地図の状態</h3>
-          <p>${new Date(state.result.created_at).toLocaleString("ja-JP")} に保存されました。</p>
+          <p>${new Date(state.result.created_at).toLocaleString("ja-JP")} に保存されました。${isLoggedIn() ? "クラウド同期済みです。" : "この端末のブラウザ内に保存されています。"}</p>
         </article>
       </section>
       <div class="actions">
         <button class="btn primary" onclick="setScreen('map')">未来マップを見る</button>
         <button class="btn accent" onclick="setScreen('poster')">未来応援図を見る</button>
+        ${isLoggedIn() ? `<button class="btn ghost" onclick="setScreen('history')">診断履歴を見る</button>` : `<button class="btn ghost" onclick="setScreen('login')">ログインして同期</button>`}
         <button class="btn ghost" onclick="restartDiagnosis()">再診断する</button>
       </div>
     </main>
@@ -1018,7 +1093,7 @@ function restartDiagnosis() {
   state.questionIndex = 0;
   state.diagnosisAnswer = {
     id: uid("answer"),
-    user_id: state.user.id,
+    user_id: state.authUser?.id || state.user.id,
     answers: {},
     created_at: now(),
   };
@@ -1042,11 +1117,15 @@ function renderMypage() {
       <section class="result-grid">
         ${resultCard("ニックネーム", state.user.nickname, "名")}
         ${resultCard("年齢層", state.user.age_group || "未選択", "年")}
+        ${resultCard("ログイン状態", isLoggedIn() ? `${state.authEmail} でログイン中` : "ゲスト利用中", "鍵")}
+        ${resultCard("保存先", isLoggedIn() ? "クラウド保存 + このブラウザ" : "この端末のブラウザのみ", "保")}
         ${state.result ? resultCard("価値観", renderPills(state.result.values), "軸", true) : ""}
         ${state.result ? resultCard("目標", state.result.one_year_goal, "目") : ""}
       </section>
       <div class="actions">
         ${state.result ? `<button class="btn primary" onclick="setScreen('map')">未来マップへ</button>` : ""}
+        <button class="btn ghost" onclick="setScreen('login')">ログイン設定</button>
+        ${isLoggedIn() ? `<button class="btn ghost" onclick="setScreen('history')">診断履歴</button>` : ""}
         <button class="btn ghost" onclick="setScreen('settings')">設定とデータ削除</button>
       </div>
     </main>
@@ -1060,7 +1139,7 @@ function renderSettings() {
         <div>
           <p class="eyebrow">設定</p>
           <h1>データと安全について</h1>
-          <p>このMVPでは、診断回答と分析結果をこの端末のLocalStorageに保存しています。</p>
+          <p>${getStorageLabel()}</p>
         </div>
       </div>
       <section class="home-panel">
@@ -1069,7 +1148,7 @@ function renderSettings() {
       </section>
       <section class="home-panel">
         <h3>保存データの削除</h3>
-        <p>削除すると、この端末に保存されたニックネーム、診断回答、分析結果が消えます。</p>
+        <p>${isLoggedIn() ? "削除すると、この端末の保存データとログイン中アカウントのクラウド保存データが消えます。" : "削除すると、この端末に保存されたニックネーム、診断回答、分析結果が消えます。"}</p>
         <div class="actions">
           <button class="btn danger" onclick="deleteAllData()">保存データを削除する</button>
           <button class="btn ghost" onclick="setScreen('mypage')">戻る</button>
@@ -1079,11 +1158,304 @@ function renderSettings() {
   `;
 }
 
-function deleteAllData() {
+function renderLogin() {
+  const disabled = supabaseClient ? "" : "disabled";
+  return `
+    <main class="screen narrow layout">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">ログインと同期</p>
+          <h1>${isLoggedIn() ? "アカウント" : "メールでログイン"}</h1>
+          <p>${isLoggedIn() ? "ログイン中は診断結果がクラウドに保存され、別端末からも見られます。" : "メールに届くリンクからログインできます。パスワードは不要です。"}</p>
+        </div>
+      </div>
+      <section class="home-panel">
+        ${isLoggedIn() ? `
+          <h3>ログイン中</h3>
+          <p>${escapeHtml(state.authEmail)} でログインしています。</p>
+          <p class="hint">${escapeHtml(state.syncStatus || getStorageLabel())}</p>
+          <div class="actions">
+            <button class="btn primary" onclick="syncLocalToCloud()">今の診断結果をクラウド保存</button>
+            <button class="btn ghost" onclick="loadCloudData()">クラウドから読み込み</button>
+            <button class="btn ghost" onclick="setScreen('history')">診断履歴を見る</button>
+            <button class="btn danger" onclick="logout()">ログアウト</button>
+          </div>
+        ` : `
+          <div class="field">
+            <label for="login-email">メールアドレス</label>
+            <input id="login-email" type="email" placeholder="you@example.com" autocomplete="email" />
+            <p class="hint">ログインリンクを送ります。届いたメールのリンクを開くとログインできます。</p>
+          </div>
+          <div class="actions">
+            <button class="btn primary" onclick="sendLoginLink()" ${disabled}>ログインリンクを送る</button>
+            <button class="btn ghost" onclick="setScreen('profile')">ゲストで使う</button>
+          </div>
+        `}
+        ${state.authMessage ? `<p class="privacy-note">${escapeHtml(state.authMessage)}</p>` : ""}
+        ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
+      </section>
+    </main>
+  `;
+}
+
+function renderHistory() {
+  if (!isLoggedIn()) return renderEmpty("診断履歴を見るにはログインが必要です。", "ログインする", "login");
+  const rows = state.diagnosisHistory || [];
+  return `
+    <main class="screen wide layout">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">診断履歴</p>
+          <h1>クラウドに保存した地図</h1>
+          <p>同じアカウントでログインすると、別端末からもここに表示されます。</p>
+        </div>
+      </div>
+      ${rows.length ? `
+        <section class="goal-list">
+          ${rows.map((row) => `
+            <button class="goal-option" onclick="loadHistoryItem('${escapeHtml(row.id)}')">
+              <strong>${escapeHtml(new Date(row.created_at).toLocaleString("ja-JP"))}</strong>
+              <span>${escapeHtml(row.one_year_goal)}</span>
+            </button>
+          `).join("")}
+        </section>
+      ` : `
+        <section class="empty-state">
+          <h2 class="compact-title">クラウド履歴はまだありません。</h2>
+          <p class="hint">診断を完了すると、ログイン中のアカウントに保存されます。</p>
+        </section>
+      `}
+      <div class="actions">
+        <button class="btn ghost" onclick="loadCloudData()">再読み込み</button>
+        <button class="btn primary" onclick="setScreen('home')">ホームへ</button>
+      </div>
+    </main>
+  `;
+}
+
+async function sendLoginLink() {
+  if (!supabaseClient) {
+    state.error = "クラウド保存の設定が見つかりません。";
+    render();
+    return;
+  }
+  const email = document.querySelector("#login-email")?.value.trim();
+  if (!email) {
+    state.error = "メールアドレスを入力してください。";
+    render();
+    return;
+  }
+  state.error = "";
+  state.authMessage = "ログインリンクを送信しています。";
+  render();
+  const { error } = await supabaseClient.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: getRedirectUrl(),
+    },
+  });
+  if (error) {
+    state.error = "ログインリンクを送れませんでした。SupabaseのAuth設定を確認してください。";
+    state.authMessage = error.message;
+  } else {
+    state.authMessage = "メールを送信しました。届いたリンクを開くとログインできます。";
+  }
+  render();
+}
+
+async function logout() {
+  if (!supabaseClient) return;
+  await supabaseClient.auth.signOut();
+  state.authUser = null;
+  state.authEmail = "";
+  state.diagnosisHistory = [];
+  state.authMessage = "ログアウトしました。";
+  render();
+}
+
+async function saveProfileToCloud() {
+  if (!supabaseClient || !isLoggedIn() || !state.user) return;
+  const { error } = await supabaseClient.from("profiles").upsert({
+    id: state.authUser.id,
+    nickname: state.user.nickname,
+    age_group: state.user.age_group || null,
+    updated_at: now(),
+  });
+  if (error) {
+    console.warn("Failed to save profile", error);
+    state.syncStatus = "プロフィールをクラウド保存できませんでした。";
+  }
+}
+
+async function saveDiagnosisToCloud() {
+  if (!supabaseClient || !isLoggedIn() || !state.diagnosisAnswer || !state.result) return;
+  const userId = state.authUser.id;
+  const { data: answerRow, error: answerError } = await supabaseClient
+    .from("diagnosis_answers")
+    .insert({
+      user_id: userId,
+      answers: state.diagnosisAnswer.answers || {},
+    })
+    .select("id, created_at")
+    .single();
+
+  if (answerError) {
+    console.warn("Failed to save answers", answerError);
+    state.syncStatus = "診断回答をクラウド保存できませんでした。";
+    return;
+  }
+
+  const resultPayload = {
+    user_id: userId,
+    diagnosis_answer_id: answerRow.id,
+    current_state: state.result.current_state,
+    values: state.result.values || [],
+    strength_seeds: state.result.strength_seeds || [],
+    concerns: state.result.concerns || [],
+    future_direction: state.result.future_direction,
+    one_year_goal: state.result.one_year_goal,
+    three_month_goal: state.result.three_month_goal,
+    monthly_theme: state.result.monthly_theme,
+    tomorrow_step: state.result.tomorrow_step,
+    support_message: state.result.support_message,
+    caution_note: state.result.caution_note,
+  };
+
+  const { data: resultRow, error: resultError } = await supabaseClient
+    .from("diagnosis_results")
+    .insert(resultPayload)
+    .select("*")
+    .single();
+
+  if (resultError) {
+    console.warn("Failed to save result", resultError);
+    state.syncStatus = "診断結果をクラウド保存できませんでした。";
+    return;
+  }
+
+  state.result = cloudRowToResult(resultRow);
+  state.result.user_id = userId;
+  state.result.diagnosis_answer_id = answerRow.id;
+  state.selectedGoal = state.result.one_year_goal;
+  state.syncStatus = "クラウドに保存しました。";
+  await loadHistory();
+  saveState();
+}
+
+async function syncLocalToCloud() {
+  if (!isLoggedIn()) {
+    setScreen("login");
+    return;
+  }
+  if (!state.result) {
+    state.authMessage = "保存できる診断結果がまだありません。";
+    render();
+    return;
+  }
+  await saveProfileToCloud();
+  await saveDiagnosisToCloud();
+  state.authMessage = "今の診断結果をクラウドに保存しました。";
+  render();
+}
+
+async function loadCloudData() {
+  if (!supabaseClient || !isLoggedIn()) return;
+  await loadHistory();
+
+  const { data: profile } = await supabaseClient
+    .from("profiles")
+    .select("*")
+    .eq("id", state.authUser.id)
+    .maybeSingle();
+
+  if (profile) {
+    state.user = {
+      id: profile.id,
+      nickname: profile.nickname,
+      age_group: profile.age_group || "",
+      created_at: profile.created_at,
+      updated_at: profile.updated_at,
+    };
+  } else if (state.user) {
+    await saveProfileToCloud();
+  }
+
+  if (state.diagnosisHistory.length) {
+    state.result = cloudRowToResult(state.diagnosisHistory[0]);
+    state.selectedGoal = state.result.one_year_goal;
+    state.screen = "home";
+  }
+
+  state.syncStatus = "クラウドから読み込みました。";
+  saveState();
+  render();
+}
+
+async function loadHistory() {
+  if (!supabaseClient || !isLoggedIn()) return;
+  const { data, error } = await supabaseClient
+    .from("diagnosis_results")
+    .select("*")
+    .eq("user_id", state.authUser.id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.warn("Failed to load history", error);
+    state.diagnosisHistory = [];
+    state.syncStatus = "診断履歴を読み込めませんでした。";
+    return;
+  }
+  state.diagnosisHistory = data || [];
+}
+
+function loadHistoryItem(id) {
+  const row = state.diagnosisHistory.find((item) => item.id === id);
+  if (!row) return;
+  state.result = cloudRowToResult(row);
+  state.selectedGoal = state.result.one_year_goal;
+  saveState();
+  setScreen("home");
+}
+
+function cloudRowToResult(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    diagnosis_answer_id: row.diagnosis_answer_id,
+    current_state: row.current_state,
+    values: asArray(row.values),
+    strength_seeds: asArray(row.strength_seeds),
+    concerns: asArray(row.concerns),
+    future_direction: row.future_direction,
+    one_year_goal: row.one_year_goal,
+    three_month_goal: row.three_month_goal,
+    monthly_theme: row.monthly_theme,
+    tomorrow_step: row.tomorrow_step,
+    support_message: row.support_message,
+    caution_note: row.caution_note,
+    created_at: row.created_at,
+  };
+}
+
+async function deleteCloudData() {
+  if (!supabaseClient || !isLoggedIn()) return;
+  await supabaseClient.from("user_goals").delete().eq("user_id", state.authUser.id);
+  await supabaseClient.from("diagnosis_results").delete().eq("user_id", state.authUser.id);
+  await supabaseClient.from("diagnosis_answers").delete().eq("user_id", state.authUser.id);
+  await supabaseClient.from("profiles").delete().eq("id", state.authUser.id);
+}
+
+async function deleteAllData() {
   const ok = window.confirm("保存データを削除します。よろしいですか？");
   if (!ok) return;
+  if (isLoggedIn()) {
+    await deleteCloudData();
+  }
   localStorage.removeItem(STORAGE_KEY);
-  state = createInitialState();
+  const authUser = state.authUser;
+  const authEmail = state.authEmail;
+  state = { ...createInitialState(), authUser, authEmail };
+  state.authMessage = "保存データを削除しました。";
   render();
 }
 
@@ -1102,6 +1474,11 @@ function renderEmpty(message, cta, screen) {
 
 window.setScreen = setScreen;
 window.submitProfile = submitProfile;
+window.sendLoginLink = sendLoginLink;
+window.logout = logout;
+window.syncLocalToCloud = syncLocalToCloud;
+window.loadCloudData = loadCloudData;
+window.loadHistoryItem = loadHistoryItem;
 window.toggleChoice = toggleChoice;
 window.previousQuestion = previousQuestion;
 window.nextQuestion = nextQuestion;
@@ -1114,4 +1491,4 @@ window.confirmGoal = confirmGoal;
 window.restartDiagnosis = restartDiagnosis;
 window.deleteAllData = deleteAllData;
 
-render();
+initializeApp();
