@@ -322,7 +322,7 @@ function isLoggedIn() {
 }
 
 function getRedirectUrl() {
-  return window.location.origin + window.location.pathname;
+  return supabaseConfig.appUrl || window.location.origin + window.location.pathname;
 }
 
 function getStorageLabel() {
