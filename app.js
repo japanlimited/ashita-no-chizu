@@ -1,4 +1,5 @@
 const STORAGE_KEY = "ashita-no-chizu:v1";
+const LOGIN_COOLDOWN_KEY = "ashita-no-chizu:login-email-cooldown-until";
 
 const supabaseConfig = window.ASHITA_SUPABASE_CONFIG || {};
 const supabaseClient =
@@ -329,6 +330,23 @@ function getStorageLabel() {
   return isLoggedIn()
     ? "診断結果はクラウドに保存され、同じアカウントで別端末からも見られます。"
     : "診断結果は、この端末のブラウザ内に保存されます。別端末との共有にはログインが必要です。";
+}
+
+function getLoginCooldownRemaining() {
+  const until = Number(localStorage.getItem(LOGIN_COOLDOWN_KEY) || "0");
+  return Math.max(0, until - Date.now());
+}
+
+function setLoginCooldown(seconds) {
+  localStorage.setItem(LOGIN_COOLDOWN_KEY, String(Date.now() + seconds * 1000));
+}
+
+function formatCooldown(ms) {
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}秒後`;
+  return `${minutes}分${seconds ? `${seconds}秒` : ""}後`;
 }
 
 function uid(prefix) {
@@ -1159,7 +1177,8 @@ function renderSettings() {
 }
 
 function renderLogin() {
-  const disabled = supabaseClient ? "" : "disabled";
+  const cooldown = getLoginCooldownRemaining();
+  const disabled = supabaseClient && cooldown === 0 ? "" : "disabled";
   return `
     <main class="screen narrow layout">
       <div class="section-head">
@@ -1187,9 +1206,10 @@ function renderLogin() {
             <p class="hint">ログインリンクを送ります。届いたメールのリンクを開くとログインできます。</p>
           </div>
           <div class="actions">
-            <button class="btn primary" onclick="sendLoginLink()" ${disabled}>ログインリンクを送る</button>
+            <button class="btn primary" onclick="sendLoginLink()" ${disabled}>${cooldown ? `${formatCooldown(cooldown)}に再送できます` : "ログインリンクを送る"}</button>
             <button class="btn ghost" onclick="setScreen('profile')">ゲストで使う</button>
           </div>
+          <p class="hint">メール送信には制限があります。届かない場合でも、短時間に何度も押さず少し待ってください。</p>
         `}
         ${state.authMessage ? `<p class="privacy-note">${escapeHtml(state.authMessage)}</p>` : ""}
         ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
@@ -1240,6 +1260,12 @@ async function sendLoginLink() {
     return;
   }
   const email = document.querySelector("#login-email")?.value.trim();
+  const cooldown = getLoginCooldownRemaining();
+  if (cooldown > 0) {
+    state.error = `ログインメールは${formatCooldown(cooldown)}に再送できます。`;
+    render();
+    return;
+  }
   if (!email) {
     state.error = "メールアドレスを入力してください。";
     render();
@@ -1257,6 +1283,7 @@ async function sendLoginLink() {
   if (error) {
     const message = error.message || "";
     if (message.includes("rate limit")) {
+      setLoginCooldown(60 * 60);
       state.error = "短時間にログインメールを送りすぎたため、Supabase側で一時的に制限されています。少し時間をおいてからもう一度試してください。";
       state.authMessage = "目安として1時間ほど待ってから、公開URLを開き直してログインリンクを送り直してください。";
     } else {
@@ -1264,6 +1291,7 @@ async function sendLoginLink() {
       state.authMessage = message;
     }
   } else {
+    setLoginCooldown(60);
     state.authMessage = "メールを送信しました。届いたリンクを開くとログインできます。";
   }
   render();
