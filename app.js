@@ -1255,8 +1255,14 @@ async function sendLoginLink() {
     },
   });
   if (error) {
-    state.error = "ログインリンクを送れませんでした。SupabaseのAuth設定を確認してください。";
-    state.authMessage = error.message;
+    const message = error.message || "";
+    if (message.includes("rate limit")) {
+      state.error = "短時間にログインメールを送りすぎたため、Supabase側で一時的に制限されています。少し時間をおいてからもう一度試してください。";
+      state.authMessage = "目安として1時間ほど待ってから、公開URLを開き直してログインリンクを送り直してください。";
+    } else {
+      state.error = "ログインリンクを送れませんでした。SupabaseのAuth設定を確認してください。";
+      state.authMessage = message;
+    }
   } else {
     state.authMessage = "メールを送信しました。届いたリンクを開くとログインできます。";
   }
