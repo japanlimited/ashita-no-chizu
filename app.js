@@ -1206,6 +1206,7 @@ function renderLogin() {
             <p class="hint">ログインリンクを送ります。届いたメールのリンクを開くとログインできます。</p>
           </div>
           <div class="actions">
+            <button class="btn primary" onclick="loginWithGoogle()" ${supabaseClient ? "" : "disabled"}>Googleでログイン</button>
             <button class="btn primary" onclick="sendLoginLink()" ${disabled}>${cooldown ? `${formatCooldown(cooldown)}に再送できます` : "ログインリンクを送る"}</button>
             <button class="btn ghost" onclick="setScreen('profile')">ゲストで使う</button>
           </div>
@@ -1251,6 +1252,27 @@ function renderHistory() {
       </div>
     </main>
   `;
+}
+
+async function loginWithGoogle() {
+  if (!supabaseClient) {
+    state.error = "クラウド保存の設定が見つかりません。";
+    render();
+    return;
+  }
+
+  const { error } = await supabaseClient.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: getRedirectUrl(),
+    },
+  });
+
+  if (error) {
+    state.error = "Googleログインを開始できませんでした。SupabaseのGoogle Provider設定を確認してください。";
+    state.authMessage = error.message || "";
+    render();
+  }
 }
 
 async function sendLoginLink() {
@@ -1508,6 +1530,7 @@ function renderEmpty(message, cta, screen) {
 
 window.setScreen = setScreen;
 window.submitProfile = submitProfile;
+window.loginWithGoogle = loginWithGoogle;
 window.sendLoginLink = sendLoginLink;
 window.logout = logout;
 window.syncLocalToCloud = syncLocalToCloud;
