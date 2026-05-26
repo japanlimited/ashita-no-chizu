@@ -1,4 +1,4 @@
 window.ASHITA_SUPABASE_CONFIG = {
-  url: "https://ebxcugqlblnkicnivswc.supabase.co",
+  url: "https://ebxcugqlblnkicnivswe.supabase.co",
   publishableKey: "sb_publishable_j5hpivL_ipFn9vlExCHONA_ob7HXHD-",
 };
