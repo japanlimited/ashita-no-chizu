@@ -332,6 +332,13 @@ function getStorageLabel() {
     : "診断結果は、この端末のブラウザ内に保存されます。別端末との共有にはログインが必要です。";
 }
 
+function getAuthDisplayName() {
+  const meta = state.authUser?.user_metadata || {};
+  const name = meta.full_name || meta.name || meta.preferred_username || "";
+  if (name) return name;
+  return state.authEmail ? state.authEmail.split("@")[0] : "";
+}
+
 function getLoginCooldownRemaining() {
   const until = Number(localStorage.getItem(LOGIN_COOLDOWN_KEY) || "0");
   return Math.max(0, until - Date.now());
@@ -451,6 +458,7 @@ function renderScreen() {
     poster: renderPoster,
     home: renderHome,
     mypage: renderMypage,
+    profileEdit: renderProfileEdit,
     settings: renderSettings,
     login: renderLogin,
     history: renderHistory,
@@ -562,6 +570,36 @@ async function submitProfile() {
     await saveProfileToCloud();
   }
   setScreen("diagnosis");
+}
+
+async function saveProfileSettings() {
+  const nickname = document.querySelector("#edit-nickname").value.trim();
+  const age = document.querySelector("#edit-age").value;
+  if (!nickname) {
+    state.error = "ニックネームを入力してください。";
+    render();
+    return;
+  }
+
+  const existingId = state.authUser?.id || state.user?.id || uid("user");
+  state.user = {
+    ...state.user,
+    id: existingId,
+    nickname,
+    age_group: age,
+    created_at: state.user?.created_at || now(),
+    updated_at: now(),
+  };
+
+  state.error = "";
+  saveState();
+  if (isLoggedIn()) {
+    await saveProfileToCloud();
+    state.authMessage = "プロフィールをクラウドに保存しました。";
+  } else {
+    state.authMessage = "プロフィールを保存しました。";
+  }
+  setScreen("mypage");
 }
 
 function renderDiagnosis() {
@@ -1142,10 +1180,50 @@ function renderMypage() {
       </section>
       <div class="actions">
         ${state.result ? `<button class="btn primary" onclick="setScreen('map')">未来マップへ</button>` : ""}
+        <button class="btn ghost" onclick="setScreen('profileEdit')">プロフィール編集</button>
         <button class="btn ghost" onclick="setScreen('login')">ログイン設定</button>
         ${isLoggedIn() ? `<button class="btn ghost" onclick="setScreen('history')">診断履歴</button>` : ""}
         <button class="btn ghost" onclick="setScreen('settings')">設定とデータ削除</button>
       </div>
+    </main>
+  `;
+}
+
+function renderProfileEdit() {
+  if (!state.user) return renderEmpty("プロフィールがまだありません。", "はじめる", "profile");
+  const nickname = state.user?.nickname || getAuthDisplayName();
+  const age = state.user?.age_group || "";
+  return `
+    <main class="screen narrow layout">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">プロフィール編集</p>
+          <h1>呼び名を整える</h1>
+          <p>アプリ内で表示されるニックネームを変更できます。診断履歴は消えません。</p>
+        </div>
+      </div>
+      <section class="profile-panel">
+        <div class="form-grid">
+          <div class="field">
+            <label for="edit-nickname">ニックネーム <span class="required">必須</span></label>
+            <input id="edit-nickname" value="${escapeHtml(nickname)}" maxlength="24" placeholder="例：みらい" />
+            <p class="hint">本名ではなく、アプリの中で呼ばれたい名前がおすすめです。</p>
+          </div>
+          <div class="field">
+            <label for="edit-age">年齢層 <span class="hint">任意</span></label>
+            <select id="edit-age">
+              <option value="">選択しない</option>
+              ${ageGroups.map((group) => `<option value="${group}" ${age === group ? "selected" : ""}>${group}</option>`).join("")}
+            </select>
+          </div>
+          ${state.authMessage ? `<p class="privacy-note">${escapeHtml(state.authMessage)}</p>` : ""}
+          ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
+          <div class="actions between">
+            <button class="btn ghost" onclick="setScreen('mypage')">戻る</button>
+            <button class="btn primary" onclick="saveProfileSettings()">保存する</button>
+          </div>
+        </div>
+      </section>
     </main>
   `;
 }
@@ -1232,11 +1310,15 @@ function renderHistory() {
         </div>
       </div>
       ${rows.length ? `
-        <section class="goal-list">
-          ${rows.map((row) => `
-            <button class="goal-option" onclick="loadHistoryItem('${escapeHtml(row.id)}')">
-              <strong>${escapeHtml(new Date(row.created_at).toLocaleString("ja-JP"))}</strong>
-              <span>${escapeHtml(row.one_year_goal)}</span>
+        <section class="history-list">
+          ${rows.map((row, index) => `
+            <button class="history-card" onclick="loadHistoryItem('${escapeHtml(row.id)}')">
+              <span class="history-index">${index + 1}</span>
+              <span class="history-body">
+                <strong>${escapeHtml(new Date(row.created_at).toLocaleString("ja-JP"))}</strong>
+                <span>${escapeHtml(row.one_year_goal)}</span>
+                <small>${escapeHtml(row.monthly_theme || "今月のテーマは未設定です。")}</small>
+              </span>
             </button>
           `).join("")}
         </section>
@@ -1434,6 +1516,15 @@ async function loadCloudData() {
     };
   } else if (state.user) {
     await saveProfileToCloud();
+  } else {
+    state.user = {
+      id: state.authUser.id,
+      nickname: getAuthDisplayName() || "ゲスト",
+      age_group: "",
+      created_at: now(),
+      updated_at: now(),
+    };
+    await saveProfileToCloud();
   }
 
   if (state.diagnosisHistory.length) {
@@ -1530,6 +1621,7 @@ function renderEmpty(message, cta, screen) {
 
 window.setScreen = setScreen;
 window.submitProfile = submitProfile;
+window.saveProfileSettings = saveProfileSettings;
 window.loginWithGoogle = loginWithGoogle;
 window.sendLoginLink = sendLoginLink;
 window.logout = logout;

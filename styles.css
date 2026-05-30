@@ -599,6 +599,65 @@ button {
   margin-bottom: 4px;
 }
 
+.history-list {
+  display: grid;
+  gap: 12px;
+}
+
+.history-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 14px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 16px;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.history-card:hover {
+  border-color: var(--green-600);
+  box-shadow: 0 14px 30px rgba(38, 53, 47, 0.09);
+  transform: translateY(-1px);
+}
+
+.history-index {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: var(--green-100);
+  color: var(--green-700);
+  font-weight: 800;
+}
+
+.history-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.history-body strong {
+  font-size: 0.96rem;
+}
+
+.history-body span {
+  color: var(--ink);
+  line-height: 1.65;
+}
+
+.history-body small {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
 .loading-screen {
   display: grid;
   place-items: center;
